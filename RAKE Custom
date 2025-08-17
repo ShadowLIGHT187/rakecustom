@@ -1,0 +1,860 @@
+-- The Rake: REMASTERED – ESP + Client + Utilities (Rayfield)
+-- Needs executor with Drawing API + exploit funcs (getgc, getrawmetatable, etc.)
+
+local Players            = game:GetService("Players")
+local LocalPlayer        = Players.LocalPlayer
+local RunService         = game:GetService("RunService")
+local Workspace          = game:GetService("Workspace")
+local UserInputService   = game:GetService("UserInputService")
+local TweenService       = game:GetService("TweenService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local Lighting           = game:GetService("Lighting")
+
+local function cam() return Workspace.CurrentCamera end
+
+-- Rayfield
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield", true))()
+local Window = Rayfield:CreateWindow({
+    Name = "Sirius • Game Menu",
+    LoadingTitle = "Rayfield Interface Suite",
+    LoadingSubtitle = "Controller",
+    ConfigurationSaving = { Enabled = true, FolderName = "SiriusConfigs", FileName = "RakeMenu" },
+    KeySystem = false
+})
+
+-- Tabs
+local ESPTab     = Window:CreateTab("ESP", 4483362458)
+local ClientTab  = Window:CreateTab("Client", 4483345998)
+local UtilTab    = Window:CreateTab("Utilities", 11252440817)
+local Settings   = Window:CreateTab("Settings", 11252440305)
+
+-- =========================
+-- ========= ESP ===========
+-- =========================
+
+local PlayerESPEnabled, RakeESPEnabled, ScrapESPEnabled = false, false, false
+local FlareESPEnabled, SupplyESPEnabled, LocESPEnabled  = false, false, false
+
+local PlayerESPObjects, RakeESPObjects = {}, {}
+local ScrapESPObjects, FlareESPObjects, SupplyESPObjects = {}, {}, {}
+local LocESPObjects = {}
+local BoxThickness = 1
+
+local function createESPObject(color, withTracer)
+    local box = Drawing.new("Square"); box.Thickness = BoxThickness; box.Filled = false; box.Color = color; box.Visible = false
+    local tracer; if withTracer then tracer = Drawing.new("Line"); tracer.Thickness = BoxThickness; tracer.Color = color; tracer.Visible = false end
+    local nameLabel = Drawing.new("Text"); nameLabel.Size = 14; nameLabel.Color = color; nameLabel.Center = true; nameLabel.Outline = true; nameLabel.Visible = false
+    local distanceLabel = Drawing.new("Text"); distanceLabel.Size = 13; distanceLabel.Color = Color3.fromRGB(200,200,200); distanceLabel.Center = true; distanceLabel.Outline = true; distanceLabel.Visible = false
+    return {Box = box, Tracer = tracer, NameLabel = nameLabel, DistanceLabel = distanceLabel}
+end
+
+local function setAllThickness(th)
+    BoxThickness = th
+    for _,bucket in pairs({PlayerESPObjects, RakeESPObjects, ScrapESPObjects, FlareESPObjects, SupplyESPObjects, LocESPObjects}) do
+        for _,rec in pairs(bucket) do
+            local E = rec.ESP or rec
+            if E.Box then E.Box.Thickness = th end
+            if E.Tracer then E.Tracer.Thickness = th end
+        end
+    end
+end
+
+local function updateESPObject(esp, worldPos, sizeScale, name, withTracer)
+    local c = cam()
+    local pos, onScreen = c:WorldToViewportPoint(worldPos)
+    if onScreen then
+        local dist = math.max(1, (c.CFrame.Position - worldPos).Magnitude)
+        local size = Vector2.new((sizeScale / dist) * 130, (sizeScale / dist) * 180)
+        esp.Box.Size = size
+        esp.Box.Position = Vector2.new(pos.X - size.X/2, pos.Y - size.Y/2)
+        esp.Box.Visible = true
+        esp.NameLabel.Text = name
+        esp.NameLabel.Position = Vector2.new(pos.X, pos.Y - size.Y/2 - 15)
+        esp.NameLabel.Visible = true
+        esp.DistanceLabel.Text = tostring(math.floor(dist)) .. "m"
+        esp.DistanceLabel.Position = Vector2.new(pos.X, pos.Y + size.Y/2 + 2)
+        esp.DistanceLabel.Visible = true
+        if withTracer and esp.Tracer then
+            esp.Tracer.From = Vector2.new(c.ViewportSize.X/2, c.ViewportSize.Y)
+            esp.Tracer.To   = Vector2.new(pos.X, pos.Y)
+            esp.Tracer.Visible = true
+        end
+    else
+        esp.Box.Visible, esp.NameLabel.Visible, esp.DistanceLabel.Visible = false, false, false
+        if esp.Tracer then esp.Tracer.Visible = false end
+    end
+end
+
+-- Player ESP (green box only)
+local function addPlayerESP(plr)
+    if plr == LocalPlayer or PlayerESPObjects[plr] then return end
+    PlayerESPObjects[plr] = createESPObject(Color3.fromRGB(0,255,0), false)
+end
+local function removePlayerESP(plr)
+    local bucket = PlayerESPObjects[plr]
+    if bucket then for _,o in pairs(bucket) do if o and o.Remove then o:Remove() end end; PlayerESPObjects[plr] = nil end
+end
+for _,p in pairs(Players:GetPlayers()) do addPlayerESP(p) end
+Players.PlayerAdded:Connect(addPlayerESP)
+Players.PlayerRemoving:Connect(removePlayerESP)
+
+-- Rake health resolver (robust)
+local function getRakeHP(rakeModel)
+    if not rakeModel then return nil, nil end
+    local cur, max
+
+    -- 1) Humanoid
+    local hum = rakeModel:FindFirstChildOfClass("Humanoid")
+    if hum then
+        cur = hum.Health
+        max = (hum.MaxHealth and hum.MaxHealth > 0) and hum.MaxHealth or max
+    end
+
+    -- 2) Monster folder NumberValues
+    if not cur then
+        local monster = rakeModel:FindFirstChild("Monster")
+        if monster then
+            local h = monster:FindFirstChild("Health")
+            if h and (h:IsA("NumberValue") or h:IsA("IntValue")) then cur = h.Value end
+            local m = monster:FindFirstChild("MaxHealth")
+            if m and (m:IsA("NumberValue") or m:IsA("IntValue")) then max = m.Value end
+        end
+    end
+
+    -- 3) Attributes
+    if not cur then
+        local a = rakeModel:GetAttribute("Health")
+        if typeof(a) == "number" then cur = a end
+    end
+    if not max then
+        local am = rakeModel:GetAttribute("MaxHealth")
+        if typeof(am) == "number" then max = am end
+    end
+
+    -- 4) Fallback: scan descendants for a likely health value
+    if not cur then
+        for _,d in ipairs(rakeModel:GetDescendants()) do
+            if d:IsA("NumberValue") or d:IsA("IntValue") then
+                local n = d.Name:lower()
+                if n == "health" or n == "hp" or n == "monsterhealth" then
+                    cur = d.Value; break
+                end
+            elseif d:IsA("Humanoid") and not cur then
+                cur = d.Health; max = d.MaxHealth
+            end
+        end
+    end
+
+    return cur, max
+end
+
+-- Rake ESP (red box + tracer) with auto-retarget + health
+local function refreshRakeRef()
+    local rake = Workspace:FindFirstChild("Rake")
+    if not RakeESPObjects["Rake"] then
+        RakeESPObjects["Rake"] = {Model = rake, ESP = createESPObject(Color3.fromRGB(255,0,0), true)}
+    else
+        RakeESPObjects["Rake"].Model = rake
+    end
+end
+refreshRakeRef()
+Workspace.ChildAdded:Connect(function(ch) if ch.Name == "Rake" then task.wait() refreshRakeRef() end end)
+Workspace.ChildRemoved:Connect(function(ch) if ch.Name == "Rake" then task.wait() refreshRakeRef() end end)
+
+-- Scrap ESP (orange box only)
+local function setupScrapESP()
+    local folder = Workspace:FindFirstChild("Filter") and Workspace.Filter:FindFirstChild("ScrapSpawns")
+    if not folder then return end
+    for _,scrap in pairs(folder:GetDescendants()) do
+        if scrap:IsA("BasePart") and scrap.Name:lower() == "scrap" and not ScrapESPObjects[scrap] then
+            ScrapESPObjects[scrap] = {Part = scrap, ESP = createESPObject(Color3.fromRGB(255,136,0), false)}
+        end
+    end
+end
+
+-- Flare Gun ESP
+local function setupFlareESP()
+    for _,inst in pairs(Workspace:GetChildren()) do
+        if inst.Name == "FlareGunPickUp" and not FlareESPObjects[inst] then
+            FlareESPObjects[inst] = {Obj = inst, ESP = createESPObject(Color3.fromRGB(255,0,0), false)}
+            if not inst:FindFirstChild("FlareGunChams") then
+                local ch = Instance.new("Highlight")
+                ch.Name = "FlareGunChams"; ch.Adornee = inst
+                ch.FillColor = Color3.fromRGB(255,0,0); ch.FillTransparency = 0.3; ch.OutlineTransparency = 0.8
+                ch.Parent = inst
+            end
+        end
+    end
+end
+
+-- Supply Drop ESP
+local function setupSupplyESP()
+    local crates = Workspace:FindFirstChild("Debris") and Workspace.Debris:FindFirstChild("SupplyCrates")
+    if not crates then return end
+    for _,v in pairs(crates:GetChildren()) do
+        if v.Name == "Box" and not SupplyESPObjects[v] then
+            local base = v:FindFirstChild("HitBox") or v:FindFirstChildWhichIsA("BasePart") or v
+            SupplyESPObjects[v] = {Obj = v, Part = base, ESP = createESPObject(Color3.fromRGB(251,255,0), false)}
+        end
+    end
+end
+
+-- Location ESP (labels only)
+local Locations = {
+    Power_Station = Vector3.new(-281.6848449707031, 21.50823974609375, -212.7472686767578),
+    Safe_House    = Vector3.new(-363.491, 16.8744, 70.3037),
+    Base_Camp     = Vector3.new(-70.7132568359375, 17.61418914794922, 209.00674438476562),
+    Shop          = Vector3.new(-25.1567, 17.2076, -258.362),
+}
+for n,p in pairs(Locations) do
+    if not LocESPObjects[n] then
+        local esp = createESPObject(Color3.fromRGB(255,136,0), false)
+        esp.Box.Visible = false; if esp.Tracer then esp.Tracer.Visible = false end
+        LocESPObjects[n] = {Name = n, Pos = p, ESP = esp}
+    end
+end
+
+-- Small status label on ESP tab
+local RakeStatusLabel = ESPTab:CreateLabel("Rake: Not Found")
+
+-- ESP Update Loop
+RunService.RenderStepped:Connect(function()
+    if PlayerESPEnabled then
+        for plr, esp in pairs(PlayerESPObjects) do
+            local char = plr.Character
+            if char and char:FindFirstChild("HumanoidRootPart") and (char:FindFirstChildOfClass("Humanoid") or {}).Health and char:FindFirstChildOfClass("Humanoid").Health > 0 then
+                updateESPObject(esp, char.HumanoidRootPart.Position, 5, plr.Name, false)
+            else
+                esp.Box.Visible, esp.NameLabel.Visible, esp.DistanceLabel.Visible = false, false, false
+            end
+        end
+    end
+
+    if RakeESPEnabled then
+        refreshRakeRef()
+        local rake = RakeESPObjects["Rake"] and RakeESPObjects["Rake"].Model
+        if rake and rake:FindFirstChild("HumanoidRootPart") then
+            local cur, max = getRakeHP(rake)
+            local title = "Rake"
+            if typeof(cur) == "number" then
+                if typeof(max) == "number" and max > 0 then
+                    title = ("Rake [HP: %d/%d]"):format(math.floor(cur), math.floor(max))
+                else
+                    title = ("Rake [HP: %d]"):format(math.floor(cur))
+                end
+            end
+            updateESPObject(RakeESPObjects["Rake"].ESP, rake.HumanoidRootPart.Position, 7, title, true)
+            if typeof(cur) == "number" then
+                if typeof(max) == "number" and max > 0 then
+                    RakeStatusLabel:Set(("Rake: Found — HP %d/%d"):format(math.floor(cur), math.floor(max)))
+                else
+                    RakeStatusLabel:Set(("Rake: Found — HP %d"):format(math.floor(cur)))
+                end
+            else
+                RakeStatusLabel:Set("Rake: Found — HP Unknown")
+            end
+        else
+            if RakeESPObjects["Rake"] then
+                local esp = RakeESPObjects["Rake"].ESP
+                esp.Box.Visible, esp.NameLabel.Visible, esp.DistanceLabel.Visible = false, false, false
+                if esp.Tracer then esp.Tracer.Visible = false end
+            end
+            RakeStatusLabel:Set("Rake: Not Found")
+        end
+    end
+
+    if ScrapESPEnabled then
+        setupScrapESP()
+        for scrap, rec in pairs(ScrapESPObjects) do
+            if scrap and scrap:IsDescendantOf(Workspace) then
+                updateESPObject(rec.ESP, scrap.Position, 2, "Scrap", false)
+            else
+                rec.ESP.Box.Visible, rec.ESP.NameLabel.Visible, rec.ESP.DistanceLabel.Visible = false, false, false
+            end
+        end
+    end
+
+    if FlareESPEnabled then
+        setupFlareESP()
+        for obj, rec in pairs(FlareESPObjects) do
+            local inst = rec.Obj
+            if inst and inst:IsDescendantOf(Workspace) then
+                local base = inst:FindFirstChild("FlareGun") or inst:FindFirstChildWhichIsA("BasePart") or inst
+                updateESPObject(rec.ESP, base.Position, 2.5, "Flare Gun", false)
+                local ch = inst:FindFirstChild("FlareGunChams"); if ch then ch.Enabled = true end
+            else
+                rec.ESP.Box.Visible, rec.ESP.NameLabel.Visible, rec.ESP.DistanceLabel.Visible = false, false, false
+                if inst and inst:FindFirstChild("FlareGunChams") then inst.FlareGunChams.Enabled = false end
+            end
+        end
+    else
+        for obj, rec in pairs(FlareESPObjects) do
+            rec.ESP.Box.Visible, rec.ESP.NameLabel.Visible, rec.ESP.DistanceLabel.Visible = false, false, false
+            if obj and obj:FindFirstChild("FlareGunChams") then obj.FlareGunChams.Enabled = false end
+        end
+    end
+
+    if SupplyESPEnabled then
+        setupSupplyESP()
+        for crate, rec in pairs(SupplyESPObjects) do
+            if crate and crate:IsDescendantOf(Workspace) and rec.Part then
+                updateESPObject(rec.ESP, rec.Part.Position, 3, "Supply Drop", false)
+            else
+                rec.ESP.Box.Visible, rec.ESP.NameLabel.Visible, rec.ESP.DistanceLabel.Visible = false, false, false
+            end
+        end
+    end
+
+    if LocESPEnabled then
+        local c = cam()
+        for name, rec in pairs(LocESPObjects) do
+            local pos, onScreen = c:WorldToViewportPoint(rec.Pos)
+            if onScreen then
+                rec.ESP.NameLabel.Text = "[LOCATION] "..name
+                rec.ESP.NameLabel.Position = Vector2.new(pos.X, pos.Y - 10)
+                rec.ESP.NameLabel.Visible = true
+                rec.ESP.DistanceLabel.Text = tostring(math.floor((c.CFrame.Position - rec.Pos).Magnitude)).."m"
+                rec.ESP.DistanceLabel.Position = Vector2.new(pos.X, pos.Y + 5)
+                rec.ESP.DistanceLabel.Visible = true
+            else
+                rec.ESP.NameLabel.Visible = false
+                rec.ESP.DistanceLabel.Visible = false
+            end
+        end
+    else
+        for _, rec in pairs(LocESPObjects) do
+            rec.ESP.NameLabel.Visible = false
+            rec.ESP.DistanceLabel.Visible = false
+        end
+    end
+end)
+
+-- ESP toggles + thickness (only R keybind exists for killaura later)
+ESPTab:CreateToggle({ Name = "Player ESP", CurrentValue = false, Callback = function(s) PlayerESPEnabled = s end })
+ESPTab:CreateToggle({ Name = "Rake ESP",   CurrentValue = false, Callback = function(s) RakeESPEnabled   = s end })
+ESPTab:CreateToggle({ Name = "Scrap ESP",  CurrentValue = false, Callback = function(s) ScrapESPEnabled  = s end })
+ESPTab:CreateToggle({ Name = "Flare Gun ESP", CurrentValue = false, Callback = function(s) FlareESPEnabled = s end })
+ESPTab:CreateToggle({ Name = "Supply Drop ESP", CurrentValue = false, Callback = function(s) SupplyESPEnabled = s end })
+ESPTab:CreateToggle({ Name = "Location ESP", CurrentValue = false, Callback = function(s) LocESPEnabled = s end })
+ESPTab:CreateSlider({ Name = "Box/Line Thickness", Range = {1, 6}, Increment = 1, CurrentValue = BoxThickness, Callback = function(v) setAllThickness(v) end })
+
+-- =========================
+-- ======== CLIENT =========
+-- =========================
+
+-- Infinite Stamina
+ClientTab:CreateToggle({
+    Name = "Infinite Stamina",
+    CurrentValue = false,
+    Callback = function(state)
+        if state then
+            for _,v in pairs(getgc(true)) do
+                if type(v) == "table" and rawget(v,"STAMINA_REGEN") then
+                    v.STAMINA_REGEN = 100
+                    v.JUMP_STAMINA  = 0
+                    v.JUMP_COOLDOWN = 0
+                    v.STAMINA_TAKE  = 0
+                    v.stamina       = 100
+                end
+            end
+        end
+    end
+})
+
+-- Infinite Night Vision
+ClientTab:CreateToggle({
+    Name = "Infinite Night Vision",
+    CurrentValue = false,
+    Callback = function(state)
+        if state then
+            for _,v in pairs(getgc(true)) do
+                if type(v) == "table" and rawget(v,"NVG_TAKE") then
+                    v.NVG_TAKE  = 0
+                    v.NVG_REGEN = 100
+                end
+            end
+        end
+    end
+})
+
+-- No Fog (game’s CurrentLightingProperties)
+local NoFog = false
+ClientTab:CreateToggle({
+    Name = "No Fog",
+    CurrentValue = false,
+    Callback = function(state)
+        NoFog = state
+        if not NoFog then
+            pcall(function()
+                local cur = ReplicatedStorage:FindFirstChild("CurrentLightingProperties")
+                if cur and cur:FindFirstChild("FogEnd") then cur.FogEnd.Value = 75 end
+            end)
+        end
+    end
+})
+RunService.Heartbeat:Connect(function()
+    if NoFog then
+        pcall(function()
+            local cur = ReplicatedStorage:FindFirstChild("CurrentLightingProperties")
+            if cur and cur:FindFirstChild("FogEnd") then cur.FogEnd.Value = 9e9 end
+        end)
+    end
+end)
+
+-- === FULLBRIGHT (robust loop) ===
+local FullBrightEnabled = false
+local SavedLighting = {}
+local FB_CC -- ColorCorrectionEffect
+
+local function saveLighting()
+    SavedLighting.ClockTime       = Lighting.ClockTime
+    SavedLighting.Brightness      = Lighting.Brightness
+    SavedLighting.GlobalShadows   = Lighting.GlobalShadows
+    SavedLighting.FogEnd          = Lighting.FogEnd
+    SavedLighting.FogStart        = Lighting.FogStart
+    SavedLighting.Ambient         = Lighting.Ambient
+    SavedLighting.OutdoorAmbient  = Lighting.OutdoorAmbient
+    SavedLighting.ColorShift_Top    = Lighting.ColorShift_Top
+    SavedLighting.ColorShift_Bottom = Lighting.ColorShift_Bottom
+    local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+    if atmo then
+        SavedLighting.__Atmosphere = {
+            Density = atmo.Density, Haze = atmo.Haze, Glare = atmo.Glare, Mie = atmo.Mie
+        }
+    else
+        SavedLighting.__Atmosphere = nil
+    end
+end
+
+local function ensureEffects()
+    if not FB_CC or FB_CC.Parent ~= Lighting then
+        FB_CC = Instance.new("ColorCorrectionEffect")
+        FB_CC.Name = "FB_ColorCorrection"
+        FB_CC.Brightness = 0.25
+        FB_CC.Contrast   = 0.05
+        FB_CC.Saturation = 0.05
+        FB_CC.Parent = Lighting
+    end
+    local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+    if atmo then
+        atmo.Density = 0; atmo.Haze = 0; atmo.Glare = 0; atmo.Mie = 0
+    end
+end
+
+local function applyFullBrightTick()
+    Lighting.ClockTime      = 14
+    Lighting.Brightness     = 2
+    Lighting.GlobalShadows  = false
+    Lighting.FogStart       = 0
+    Lighting.FogEnd         = 9e9
+    Lighting.Ambient        = Color3.fromRGB(255,255,255)
+    Lighting.OutdoorAmbient = Color3.fromRGB(255,255,255)
+    Lighting.ColorShift_Top    = Color3.fromRGB(255,255,255)
+    Lighting.ColorShift_Bottom = Color3.fromRGB(255,255,255)
+    local cur = ReplicatedStorage:FindFirstChild("CurrentLightingProperties")
+    if cur and cur:FindFirstChild("FogEnd") then cur.FogEnd.Value = 9e9 end
+    ensureEffects()
+end
+
+local function startFullbrightLoop()
+    pcall(function() RunService:UnbindFromRenderStep("FB_Loop") end)
+    RunService:BindToRenderStep("FB_Loop", 201, function()
+        if FullBrightEnabled then applyFullBrightTick() end
+    end)
+end
+local function stopFullbrightLoop()
+    pcall(function() RunService:UnbindFromRenderStep("FB_Loop") end)
+end
+
+ClientTab:CreateToggle({
+    Name = "Fullbright",
+    CurrentValue = false,
+    Callback = function(state)
+        FullBrightEnabled = state
+        if FullBrightEnabled then
+            saveLighting()
+            startFullbrightLoop()
+        else
+            stopFullbrightLoop()
+            if FB_CC then pcall(function() FB_CC:Destroy() end) FB_CC = nil end
+            pcall(function()
+                for k,v in pairs(SavedLighting) do
+                    if typeof(Lighting[k]) == typeof(v) then Lighting[k] = v end
+                end
+                local atmo = Lighting:FindFirstChildOfClass("Atmosphere")
+                if atmo and SavedLighting.__Atmosphere then
+                    atmo.Density = SavedLighting.__Atmosphere.Density
+                    atmo.Haze    = SavedLighting.__Atmosphere.Haze
+                    atmo.Glare   = SavedLighting.__Atmosphere.Glare
+                    atmo.Mie     = SavedLighting.__Atmosphere.Mie
+                end
+            end)
+        end
+    end
+})
+Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    if FullBrightEnabled then applyFullBrightTick() end
+end)
+Lighting.ChildRemoved:Connect(function(child)
+    if FullBrightEnabled and child == FB_CC then task.defer(ensureEffects) end
+end)
+
+-- FOV (robust)
+local DefaultFOV = cam().FieldOfView
+local FOVValue, FOVEnabled = 70, false
+ClientTab:CreateSlider({
+    Name = "Field of View",
+    Range = {50, 120},
+    Increment = 1,
+    CurrentValue = FOVValue,
+    Callback = function(v) FOVValue = v; if FOVEnabled then cam().FieldOfView = FOVValue end end
+})
+ClientTab:CreateToggle({
+    Name = "Enable FOV",
+    CurrentValue = false,
+    Callback = function(state)
+        FOVEnabled = state
+        if FOVEnabled then cam().FieldOfView = FOVValue else DefaultFOV = cam().FieldOfView; cam().FieldOfView = DefaultFOV end
+    end
+})
+Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    if FOVEnabled then cam().FieldOfView = FOVValue else DefaultFOV = cam().FieldOfView end
+end)
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.1)
+    if FOVEnabled then cam().FieldOfView = FOVValue end
+end)
+
+-- WORKING WalkSpeed
+local WalkSpeedValue, WalkSpeedEnabled = 16, false
+local HumanoidSpeedConn
+local function getHumanoid()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    return char:FindFirstChildOfClass("Humanoid")
+end
+local function bindHumanoidSpeed(hum)
+    if HumanoidSpeedConn then HumanoidSpeedConn:Disconnect() HumanoidSpeedConn = nil end
+    if not hum then return end
+    HumanoidSpeedConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+        if WalkSpeedEnabled and hum.WalkSpeed ~= WalkSpeedValue then hum.WalkSpeed = WalkSpeedValue end
+    end)
+    if WalkSpeedEnabled then hum.WalkSpeed = WalkSpeedValue end
+end
+ClientTab:CreateSlider({
+    Name = "WalkSpeed",
+    Range = {16, 30},
+    Increment = 1,
+    CurrentValue = WalkSpeedValue,
+    Callback = function(v)
+        WalkSpeedValue = v
+        local hum = getHumanoid()
+        if WalkSpeedEnabled and hum then hum.WalkSpeed = WalkSpeedValue end
+    end
+})
+ClientTab:CreateToggle({
+    Name = "Enable WalkSpeed",
+    CurrentValue = false,
+    Callback = function(state)
+        WalkSpeedEnabled = state
+        local hum = getHumanoid()
+        if WalkSpeedEnabled and hum then hum.WalkSpeed = WalkSpeedValue end
+        bindHumanoidSpeed(hum)
+    end
+})
+LocalPlayer.CharacterAdded:Connect(function(char)
+    local hum = char:WaitForChild("Humanoid")
+    bindHumanoidSpeed(hum)
+end)
+RunService.Heartbeat:Connect(function()
+    if WalkSpeedEnabled then
+        local hum = getHumanoid()
+        if hum and hum.WalkSpeed ~= WalkSpeedValue then hum.WalkSpeed = WalkSpeedValue end
+    end
+end)
+
+-- Third Person nudge
+ClientTab:CreateButton({
+    Name = "Third Person",
+    Callback = function()
+        pcall(function()
+            local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+            local rag  = char:WaitForChild("RagdollTime", 5)
+            if rag and rag:FindFirstChild("RagdollSwitch") then
+                rag.RagdollSwitch.Value = true
+                rag.RagdollSwitch.Value = false
+            end
+        end)
+    end
+})
+
+-- No Fall Damage (hook)
+local NoFallDMG = false
+ClientTab:CreateToggle({ Name = "No Fall Damage", CurrentValue = false, Callback = function(state) NoFallDMG = state end })
+do
+    if not _G.__RakeNoFallHooked then
+        _G.__RakeNoFallHooked = true
+        local mt = getrawmetatable(game)
+        local old = mt.__namecall
+        setreadonly(mt, false)
+        mt.__namecall = function(self, ...)
+            local method = getnamecallmethod()
+            if NoFallDMG and tostring(self) == "FD_Event" and method == "FireServer" then
+                local args = {...}; args[1], args[2] = 0, 0
+                return old(self, unpack(args))
+            end
+            return old(self, ...)
+        end
+        setreadonly(mt, true)
+    end
+end
+
+-- FreeCam (toggle + speed)
+local FreeCamEnabled = false
+local FreeCamSpeed = 0.2
+local FreeCamPart = Instance.new("Part")
+FreeCamPart.Name = "FreeCamPart"; FreeCamPart.Anchored = true; FreeCamPart.Size = Vector3.new(1,1,1)
+FreeCamPart.Transparency = 1; FreeCamPart.Parent = Workspace
+local function tweenPart(time, part, cf)
+    local info = TweenInfo.new(time, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, 0, false, 0)
+    local tw = TweenService:Create(part, info, {CFrame = cf}); tw:Play()
+end
+ClientTab:CreateToggle({
+    Name = "FreeCam",
+    CurrentValue = false,
+    Callback = function(state)
+        FreeCamEnabled = state
+        if FreeCamEnabled then
+            pcall(function()
+                local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+                local head = char:WaitForChild("Head")
+                FreeCamPart.CFrame = head.CFrame
+                cam().CameraType = Enum.CameraType.Scriptable
+                cam().CameraSubject = FreeCamPart
+                char:WaitForChild("HumanoidRootPart").Anchored = true
+            end)
+        else
+            pcall(function()
+                local char = LocalPlayer.Character
+                if char and char:FindFirstChild("HumanoidRootPart") then char.HumanoidRootPart.Anchored = false end
+                cam().CameraType = Enum.CameraType.Custom
+                cam().CameraSubject = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Head") or LocalPlayer.Character
+            end)
+        end
+    end
+})
+ClientTab:CreateSlider({
+    Name = "FreeCam Speed",
+    Range = {0.01, 20},
+    Increment = 0.01,
+    CurrentValue = FreeCamSpeed,
+    Callback = function(v) FreeCamSpeed = v end
+})
+RunService.Heartbeat:Connect(function()
+    if not FreeCamEnabled then return end
+    pcall(function()
+        local mouse = LocalPlayer:GetMouse()
+        local cf = FreeCamPart.CFrame
+        local lookAt = CFrame.new(cf.Position, mouse.Hit.Position)
+        local move = Vector3.new()
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then move = move + lookAt.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then move = move - lookAt.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then move = move - lookAt.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then move = move + lookAt.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then move = move + Vector3.new(0,1,0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then move = move - Vector3.new(0,1,0) end
+        local nextPos = (move.Magnitude > 0) and (cf.Position + move.Unit * FreeCamSpeed) or cf.Position
+        FreeCamPart.CFrame = CFrame.new(nextPos, nextPos + lookAt.LookVector)
+        cam().CFrame = FreeCamPart.CFrame
+    end)
+end)
+
+-- Timer + Blood Hour alert
+local TimeLabel = ClientTab:CreateLabel("Time: --:--")
+RunService.Heartbeat:Connect(function()
+    pcall(function()
+        local night = ReplicatedStorage:FindFirstChild("Night")
+        local timer = ReplicatedStorage:FindFirstChild("Timer")
+        if night and timer then
+            if night.Value == true then
+                TimeLabel:Set("Time Until Day: "..tostring(timer.Value))
+            else
+                TimeLabel:Set("Time Until Night: "..tostring(timer.Value))
+            end
+        end
+    end)
+end)
+RunService.Heartbeat:Connect(function()
+    pcall(function()
+        local flag = ReplicatedStorage:FindFirstChild("InitiateBloodHour")
+        if flag and flag.Value == true then
+            Rayfield:Notify({ Title = "ALERT", Content = "Blood Hour is starting!", Duration = 5 })
+            flag.Value = false
+        end
+    end)
+end)
+
+-- =========================
+-- ======= UTILITIES =======
+-- =========================
+
+-- Bring Scraps
+UtilTab:CreateButton({
+    Name = "Bring Scraps",
+    Callback = function()
+        pcall(function()
+            local folder = Workspace:FindFirstChild("Filter") and Workspace.Filter:FindFirstChild("ScrapSpawns")
+            if not folder then return end
+            local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+            local root = char:WaitForChild("HumanoidRootPart")
+            local index, radius, step = 0, 7, 12
+            for _,inst in pairs(folder:GetDescendants()) do
+                if inst.Name:lower() == "scrap" then
+                    index = index + 1
+                    local angle = math.rad(index * step)
+                    local offset = Vector3.new(math.cos(angle)*radius, 2, math.sin(angle)*radius)
+                    local targetCF = CFrame.new(root.Position + offset)
+                    if inst:IsA("BasePart") then
+                        local model = inst.Parent
+                        if model and model:IsA("Model") and model.PrimaryPart then
+                            model:PivotTo(targetCF)
+                        elseif model and model:IsA("Model") and not model.PrimaryPart then
+                            pcall(function() model.PrimaryPart = inst end)
+                            if model.PrimaryPart then model:PivotTo(targetCF) else inst.CFrame = targetCF end
+                        else
+                            pcall(function() inst.Anchored = false end)
+                            inst.CFrame = targetCF
+                            pcall(function() inst.AssemblyLinearVelocity = Vector3.new() end)
+                        end
+                    elseif inst:IsA("Model") then
+                        inst:PivotTo(targetCF)
+                    end
+                end
+            end
+        end)
+    end
+})
+
+-- Insta-Open Supply Drop
+local InstaOpen = false
+UtilTab:CreateToggle({
+    Name = "Insta-Open Supply Drop",
+    CurrentValue = false,
+    Callback = function(state) InstaOpen = state end
+})
+RunService.Heartbeat:Connect(function()
+    if not InstaOpen then return end
+    pcall(function()
+        local crates = Workspace:FindFirstChild("Debris") and Workspace.Debris:FindFirstChild("SupplyCrates")
+        if not crates then return end
+        if crates:FindFirstChild("Box") then
+            local box = crates.Box
+            local prompt = box:FindFirstChild("GUIPart") and box.GUIPart:FindFirstChild("ProximityPrompt")
+            if prompt then for k,_ in pairs(prompt:GetAttributes()) do prompt:SetAttribute(k, false) end end
+            if box:FindFirstChild("UnlockValue") then box.UnlockValue.Value = 100 end
+        end
+    end)
+end)
+
+-- Remove Invisible Walls
+UtilTab:CreateButton({
+    Name = "Remove Invisible Walls",
+    Callback = function()
+        pcall(function()
+            local filter = Workspace:FindFirstChild("Filter") and Workspace.Filter
+            if not filter then return end
+            local walls = filter:FindFirstChild("InvisibleWalls")
+            if not walls then return end
+            for _,v in pairs(walls:GetChildren()) do
+                if v.Name:lower():find("invis") then v:Destroy() end
+            end
+        end)
+    end
+})
+
+-- Rake Killaura (uses StunStick) + ONLY keybind "R"
+local RakeAura = false
+UtilTab:CreateToggle({
+    Name = "Rake Killaura",
+    CurrentValue = false,
+    Callback = function(state) RakeAura = state end
+})
+ESPTab:CreateKeybind({
+    Name = "Toggle Rake Killaura",
+    CurrentKeybind = "R",
+    HoldToInteract = false,
+    Callback = function() RakeAura = not RakeAura end
+})
+RunService.Heartbeat:Connect(function()
+    if not RakeAura then return end
+    pcall(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        local stick = char:FindFirstChild("StunStick")
+        local rake = Workspace:FindFirstChild("Rake")
+        if stick and rake and rake:FindFirstChild("HumanoidRootPart") and char:FindFirstChild("HumanoidRootPart") then
+            local dist = (rake.HumanoidRootPart.Position - char.HumanoidRootPart.Position).Magnitude
+            if dist < 200 then
+                stick.Event:FireServer("S")
+                task.wait()
+                stick.Event:FireServer("H", rake.HumanoidRootPart)
+            end
+        end
+    end)
+end)
+
+-- Hide toggle (under map)
+local HidePart = Instance.new("Part")
+HidePart.Size = Vector3.new(20,1000,20); HidePart.Anchored = true
+HidePart.Position = Vector3.new(0,10000,0); HidePart.Name = "HideColumn"; HidePart.Parent = Workspace
+local HideHL = Instance.new("Highlight")
+HideHL.Name = "HideHL"; HideHL.FillColor = Color3.new(1,1,1); HideHL.OutlineColor = Color3.new(170/255,0,0)
+HideHL.FillTransparency = 0.8; HideHL.OutlineTransparency = 0.8; HideHL.Parent = HidePart
+local Hidden = false
+UtilTab:CreateToggle({
+    Name = "Hide (Under Map)",
+    CurrentValue = false,
+    Callback = function(state)
+        Hidden = state
+        pcall(function()
+            local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+            local hrp = char:WaitForChild("HumanoidRootPart")
+            if Hidden then
+                hrp.Anchored = false
+                for _=1,10 do hrp.CFrame = hrp.CFrame + Vector3.new(0,5,0); task.wait(); hrp.CFrame = hrp.CFrame + Vector3.new(0,-5,0) end
+                hrp.CFrame = hrp.CFrame + Vector3.new(0,-15,0); task.wait()
+                hrp.Anchored = true
+                HidePart.Position = hrp.Position + Vector3.new(0,-505,0)
+                HideHL.Adornee = HidePart
+            else
+                hrp.Anchored = false
+                for _=1,10 do hrp.CFrame = hrp.CFrame + Vector3.new(0,5,0); task.wait(); hrp.CFrame = hrp.CFrame + Vector3.new(0,-5,0) end
+                hrp.CFrame = hrp.CFrame + Vector3.new(0,15,0); task.wait()
+                hrp.Anchored = false
+                HideHL.Adornee = nil
+            end
+        end)
+    end
+})
+
+-- =========================
+-- ======== SETTINGS =======
+-- =========================
+
+Settings:CreateButton({
+    Name = "Unload GUI",
+    Callback = function()
+        for _,t in pairs({PlayerESPObjects, RakeESPObjects, ScrapESPObjects, FlareESPObjects, SupplyESPObjects, LocESPObjects}) do
+            for _,rec in pairs(t) do
+                local E = rec.ESP or rec
+                if E.Box then E.Box:Remove() end
+                if E.Tracer then E.Tracer:Remove() end
+                if E.NameLabel then E.NameLabel:Remove() end
+                if E.DistanceLabel then E.DistanceLabel:Remove() end
+            end
+        end
+        Rayfield:Destroy()
+    end
+})
+
+Rayfield:Notify({ Title = "Menu Loaded", Content = "Rake HP overlay added. Fullbright loop + R keybind + auto-retargeting ESP.", Duration = 5 })
