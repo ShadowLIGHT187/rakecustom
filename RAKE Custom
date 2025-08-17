@@ -16,8 +16,8 @@ local function cam() return Workspace.CurrentCamera end
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield", true))()
 local Window = Rayfield:CreateWindow({
     Name = "Sirius • Game Menu",
-    LoadingTitle = "Rayfield Interface Suite",
-    LoadingSubtitle = "Controller",
+    LoadingTitle = "What's your desire?",
+    LoadingSubtitle = "Loading...",
     ConfigurationSaving = { Enabled = true, FolderName = "SiriusConfigs", FileName = "RakeMenu" },
     KeySystem = false
 })
